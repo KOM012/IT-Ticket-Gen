@@ -7,10 +7,10 @@ Interactive Streamlit app that generates IT support tickets and provides AI-powe
 **try here**:  https://itticketgen.streamlit.app/
 
 ## Features
-**Free AI Models: Uses OpenRouter's free models (Gemini, Llama, DeepSeek)**
-**Difficulty Levels: Simple → Complex IT issues**
-**Two-Step Learning: Get hints + Validate solutions**
-**Multiple Models: Switch between different AI models**
+<br>**Free AI Models: Uses OpenRouter's free models (Gemini, Llama, DeepSeek)**
+<br>**Difficulty Levels: Simple → Complex IT issues**
+<br>**Two-Step Learning: Get hints + Validate solutions**
+<br>**Multiple Models: Switch between different AI models**
 
 ## How It Works
 1.**Configure API key in sidebar**
