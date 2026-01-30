@@ -15,6 +15,53 @@ st.set_page_config(
 st.title("🤖 AI IT Support Ticket Generator")
 st.markdown("Generate IT tickets and get helpful hints for your solutions")
 
+# Get API key from Streamlit Secrets - Fixed the key name
+try:
+    # Try different possible secret names
+    GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "") or st.secrets.get("GEMINI_API_KEY", "")
+    
+    if not GOOGLE_API_KEY:
+        # Use the specific key you provided as a fallback (for testing)
+        GOOGLE_API_KEY = "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"
+    
+    if not GOOGLE_API_KEY:
+        st.error("""
+        ⚠️ **API Key Not Configured**
+        
+        Please configure your Google AI API key in Streamlit Secrets:
+        
+        **For Streamlit Cloud:**
+        - Go to app settings → Secrets
+        - Add: `GOOGLE_API_KEY = "your-api-key-here"`
+        
+        **For local development:**
+        - Create `.streamlit/secrets.toml`
+        - Add: `GOOGLE_API_KEY = "your-api-key-here"`
+        
+        Get a free API key from: https://makersuite.google.com/app/apikey
+        """)
+        st.stop()
+        
+except Exception as e:
+    st.error(f"Error loading API key: {str(e)[:100]}")
+    st.stop()
+
+# Configure Google AI
+try:
+    genai.configure(api_key=GOOGLE_API_KEY)
+    # Test the configuration by listing models
+    genai.list_models()
+    api_key_valid = True
+except Exception as e:
+    error_msg = str(e)
+    if "API key not valid" in error_msg or "invalid" in error_msg.lower():
+        st.error(f"❌ **Invalid API Key:** The provided API key is not valid for Google Gemini API.")
+    elif "quota" in error_msg.lower():
+        st.error("❌ **Quota Exceeded:** API quota has been exceeded. Please check your Google AI Studio account.")
+    else:
+        st.error(f"❌ **API Configuration Error:** {error_msg[:150]}")
+    st.stop()
+
 # Initialize session state
 if 'ticket' not in st.session_state:
     st.session_state.ticket = None
@@ -22,55 +69,48 @@ if 'validation' not in st.session_state:
     st.session_state.validation = None
 if 'agent_response' not in st.session_state:
     st.session_state.agent_response = ""
-if 'available_models' not in st.session_state:
-    st.session_state.available_models = []
-if 'model_list_error' not in st.session_state:
-    st.session_state.model_list_error = None
-if 'solution_effective' not in st.session_state:
-    st.session_state.solution_effective = None
-if 'user_api_key' not in st.session_state:
-    st.session_state.user_api_key = ""
 if 'selected_model' not in st.session_state:
     st.session_state.selected_model = None
+if 'available_models' not in st.session_state:
+    st.session_state.available_models = []
+if 'solution_effective' not in st.session_state:
+    st.session_state.solution_effective = None
 
-def get_available_models(api_key):
+def get_available_models():
     """Get list of available models from Google AI."""
-    if not api_key:
-        return [], "No API key configured"
-    
     try:
-        genai.configure(api_key=api_key)
         models = genai.list_models()
         
-        # Filter for models that support generateContent
+        # Filter for text models that support generateContent
         available = []
         for model in models:
             if "generateContent" in model.supported_generation_methods:
-                available.append(model.name)
+                model_name = model.name
+                # Exclude vision and embedding models
+                if "-vision" not in model_name.lower() and "embed" not in model_name.lower():
+                    available.append(model_name)
         
+        # Sort models for better display
+        available.sort()
         return available, None
         
     except Exception as e:
-        error_msg = str(e)
-        if "quota" in error_msg.lower():
-            return [], "API quota exceeded. Please check your Google AI Studio account."
-        elif "invalid" in error_msg.lower() or "malformed" in error_msg.lower():
-            return [], "Invalid API key. Please check your key and try again."
-        elif "permission" in error_msg.lower():
-            return [], "API key doesn't have permission to access models."
-        else:
-            return [], f"Error fetching models: {error_msg[:100]}"
+        return [], f"Error fetching models: {str(e)[:100]}"
 
 def parse_json_from_text(text):
     """Extract and parse JSON from text."""
     try:
+        # Clean the text - remove markdown code blocks
+        cleaned_text = text.strip()
+        cleaned_text = cleaned_text.replace('```json', '').replace('```', '').strip()
+        
         # Try to find JSON object in the text
-        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        json_match = re.search(r'\{.*\}', cleaned_text, re.DOTALL)
         if json_match:
             json_str = json_match.group(0)
             return json.loads(json_str)
         
-        # If no complete JSON found, build it manually
+        # If no complete JSON found, try to build it manually
         ticket_data = {
             "user": "IT User",
             "issue": "Technical issue requiring assistance",
@@ -78,24 +118,20 @@ def parse_json_from_text(text):
         }
         
         # Try to extract user
-        user_match = re.search(r'"user":\s*"([^"]+)"', text)
+        user_match = re.search(r'"user":\s*"([^"]+)"', cleaned_text)
         if user_match:
             ticket_data["user"] = user_match.group(1)
         
         # Try to extract issue
-        issue_match = re.search(r'"issue":\s*"([^"]+)"', text)
+        issue_match = re.search(r'"issue":\s*"([^"]+)"', cleaned_text)
         if issue_match:
             ticket_data["issue"] = issue_match.group(1)
         
         return ticket_data
         
-    except Exception:
-        # Return a minimal valid ticket
-        return {
-            "user": "User from Department",
-            "issue": "Help needed with technical problem",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
-        }
+    except Exception as e:
+        st.error(f"JSON parsing error: {str(e)[:100]}")
+        return None
 
 def get_hint_prompt(ticket_issue, proposed_solution, difficulty_level):
     """Create a hint prompt based on difficulty level."""
@@ -199,7 +235,7 @@ def get_ticket_prompt(difficulty_level):
         return """
 Create a simple, common IT support ticket. Provide ONLY a valid JSON object with these exact fields:
 - "user": Name and department
-- "issue": Basic IT problem that has straightforward solutions
+- "issue": Clear description of a basic IT problem
 
 Make the issue simple and common. Good for beginners.
 
@@ -216,7 +252,7 @@ Return ONLY the JSON object, no other text.
         return """
 Create a medium-difficulty IT support ticket. Provide ONLY a valid JSON object with these exact fields:
 - "user": Name and department
-- "issue": IT problem requiring some technical knowledge and multiple troubleshooting steps
+- "issue": IT problem requiring some technical knowledge
 
 Make the issue realistic with some technical details. Good for intermediate users.
 
@@ -233,196 +269,80 @@ Return ONLY the JSON object, no other text.
         return """
 Create a complex IT support ticket. Provide ONLY a valid JSON object with these exact fields:
 - "user": Name and department
-- "issue": Challenging IT problem requiring deep technical knowledge, investigation, and possibly multiple systems
+- "issue": Challenging IT problem requiring investigation
 
-Make the issue complex with technical details, error messages, and specific scenarios. Good for advanced users.
+Make the issue complex with technical details and specific scenarios. Good for advanced users.
 
 Example format:
 {
   "user": "Network Admin from IT Department",
-  "issue": "Intermittent packet loss between main office and cloud servers. Issue occurs randomly between 2-4 PM daily. Speed tests show normal bandwidth but specific applications experience timeouts. Firewall logs show no blocked connections."
+  "issue": "Intermittent packet loss between main office and cloud servers. Issue occurs randomly between 2-4 PM daily."
 }
 
 Return ONLY the JSON object, no other text.
 """
 
-def generate_ticket(api_key, model_name, difficulty):
-    """Generate a ticket using the API."""
-    try:
-        genai.configure(api_key=api_key)
-        model_instance = genai.GenerativeModel(model_name)
-        
-        prompt = get_ticket_prompt(difficulty)
-        
-        response = model_instance.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.3,
-                max_output_tokens=300,
-            )
-        )
-        
-        response_text = response.text.strip()
-        ticket_json = parse_json_from_text(response_text)
-        ticket_json["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        ticket_json["model"] = model_name
-        ticket_json["difficulty"] = difficulty
-        
-        return ticket_json, None
-        
-    except Exception as e:
-        error_msg = str(e)
-        # Create a fallback ticket
-        fallback_issues = {
-            "simple": "Computer won't turn on. No lights when power button is pressed.",
-            "medium": "Cannot connect to WiFi. Computer sees networks but fails to connect.",
-            "complex": "Intermittent network drops affecting VoIP calls. Issue occurs during peak hours only."
-        }
-        fallback_ticket = {
-            "user": f"Practice User ({difficulty} level)",
-            "issue": fallback_issues.get(difficulty, "Technical issue requiring investigation"),
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "model": "Fallback Generation",
-            "difficulty": difficulty
-        }
-        return fallback_ticket, error_msg
-
-def get_hints(api_key, model_name, ticket_issue, user_solution, difficulty):
-    """Get hints for the solution."""
-    try:
-        genai.configure(api_key=api_key)
-        model_instance = genai.GenerativeModel(model_name)
-        
-        hint_prompt = get_hint_prompt(ticket_issue, user_solution, difficulty)
-        
-        response = model_instance.generate_content(
-            hint_prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.2,
-                max_output_tokens=400,
-            )
-        )
-        
-        return response.text.strip(), None
-        
-    except Exception as e:
-        error_msg = str(e)
-        if "quota" in error_msg.lower():
-            return None, "API quota exceeded. Please try again later or use a different API key."
-        elif "invalid" in error_msg.lower() or "malformed" in error_msg.lower():
-            return None, "Invalid API key. Please check your key."
+# Initialize models on first load
+if not st.session_state.available_models:
+    with st.spinner("Loading available models..."):
+        models, error = get_available_models()
+        if error:
+            st.error(f"Failed to load models: {error}")
         else:
-            return None, f"Failed to generate hints: {error_msg[:100]}"
-
-def validate_solution(api_key, model_name, ticket_issue, user_solution):
-    """Validate if solution would fix the issue."""
-    try:
-        genai.configure(api_key=api_key)
-        model_instance = genai.GenerativeModel(model_name)
-        
-        validation_prompt = get_validation_prompt(ticket_issue, user_solution)
-        
-        response = model_instance.generate_content(
-            validation_prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.1,
-                max_output_tokens=200,
-            )
-        )
-        
-        return response.text.strip(), None
-        
-    except Exception as e:
-        error_msg = str(e)
-        if "quota" in error_msg.lower():
-            return None, "API quota exceeded. Please try again later or use a different API key."
-        elif "invalid" in error_msg.lower() or "malformed" in error_msg.lower():
-            return None, "Invalid API key. Please check your key."
-        else:
-            return None, f"Failed to evaluate solution: {error_msg[:100]}"
+            st.session_state.available_models = models
+            if models:
+                # Prefer gemini-pro models if available
+                gemini_pro_models = [m for m in models if 'gemini-pro' in m]
+                if gemini_pro_models:
+                    st.session_state.selected_model = gemini_pro_models[0]
+                else:
+                    st.session_state.selected_model = models[0]
 
 # Sidebar for configuration
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # API Key section
-    st.markdown("### 🔑 API Key")
-    api_key_input = st.text_input(
-        "Enter your Google AI Studio API key:",
-        value=st.session_state.user_api_key,
-        type="password",
-        help="Get a free API key from https://makersuite.google.com/app/apikey"
-    )
+    st.success("✅ API Key Configured")
+    st.caption("Using secure API key")
     
-    # Update API key if changed
-    if api_key_input != st.session_state.user_api_key:
-        st.session_state.user_api_key = api_key_input
-        # Clear model list to force refresh
-        st.session_state.available_models = []
-        st.session_state.model_list_error = None
-        st.session_state.selected_model = None
-    
-    # Load models button
-    if st.session_state.user_api_key:
-        if st.button("🔄 Load Available Models", use_container_width=True):
-            with st.spinner("Fetching available models..."):
-                models, error = get_available_models(st.session_state.user_api_key)
-                st.session_state.available_models = models
-                st.session_state.model_list_error = error
-                if models:
-                    st.session_state.selected_model = models[0] if models else None
-    
-    # Show available models
+    # Model selection
     if st.session_state.available_models:
         st.markdown(f"### 🤖 Available Models ({len(st.session_state.available_models)})")
         
-        # Filter for text models
-        text_models = [m for m in st.session_state.available_models 
-                      if "-vision" not in m.lower() and "embed" not in m.lower()]
+        selected = st.selectbox(
+            "Select AI Model",
+            st.session_state.available_models,
+            index=st.session_state.available_models.index(st.session_state.selected_model) 
+            if st.session_state.selected_model in st.session_state.available_models else 0,
+            key="model_selector"
+        )
+        st.session_state.selected_model = selected
         
-        if text_models:
-            selected = st.selectbox(
-                "Select AI Model",
-                text_models,
-                index=0,
-                key="model_selector"
-            )
-            st.session_state.selected_model = selected
-            
-            with st.expander("ℹ️ Model Details"):
-                st.markdown(f"**Selected:** `{selected}`")
-                st.markdown(f"**Total available:** {len(st.session_state.available_models)}")
-        else:
-            st.warning("No text generation models found")
-            st.session_state.selected_model = None
-    elif st.session_state.model_list_error:
-        st.error(st.session_state.model_list_error)
-        st.session_state.selected_model = None
-    elif st.session_state.user_api_key:
-        st.info("Click 'Load Available Models' to see available models")
-        st.session_state.selected_model = None
+        with st.expander("ℹ️ Model Details"):
+            st.markdown(f"**Selected:** `{selected}`")
+            if "flash" in selected.lower():
+                st.caption("⚡ Fast model, good for quick responses")
+            elif "pro" in selected.lower():
+                st.caption("🧠 Advanced model, better for complex tasks")
     
     # Difficulty slider
-    if st.session_state.selected_model:
-        st.markdown("---")
-        st.markdown("### 🎯 Difficulty Level")
-        
-        difficulty = st.select_slider(
-            "Choose challenge level",
-            options=["simple", "medium", "complex"],
-            value="medium",
-            help="Simple: Easy common issues | Medium: Standard IT problems | Complex: Advanced technical challenges"
-        )
-        
-        # Show difficulty descriptions
-        if difficulty == "simple":
-            st.caption("🟢 **Simple:** Basic issues, great for beginners")
-        elif difficulty == "medium":
-            st.caption("🟡 **Medium:** Standard IT problems, good practice")
-        else:
-            st.caption("🔴 **Complex:** Advanced challenges, test your expertise")
+    st.markdown("---")
+    st.markdown("### 🎯 Difficulty Level")
+    
+    difficulty = st.select_slider(
+        "Choose challenge level",
+        options=["simple", "medium", "complex"],
+        value="medium",
+        help="Simple: Easy common issues | Medium: Standard IT problems | Complex: Advanced technical challenges"
+    )
+    
+    # Show difficulty descriptions
+    if difficulty == "simple":
+        st.caption("🟢 **Simple:** Basic issues, great for beginners")
+    elif difficulty == "medium":
+        st.caption("🟡 **Medium:** Standard IT problems, good practice")
     else:
-        difficulty = "medium"
+        st.caption("🔴 **Complex:** Advanced challenges, test your expertise")
 
     st.markdown("---")
     if st.button("🔄 Refresh App", use_container_width=True):
@@ -437,10 +357,8 @@ col_left, col_center, col_right = st.columns([1, 2, 1])
 with col_center:
     # Main container
     with st.container():
-        # Check if ready to generate
-        can_generate = (st.session_state.selected_model and 
-                       st.session_state.user_api_key and 
-                       len(st.session_state.user_api_key) > 0)
+        # Check if ready
+        can_generate = st.session_state.selected_model is not None and len(st.session_state.available_models) > 0
         
         # Header section
         if not st.session_state.ticket:
@@ -449,7 +367,10 @@ with col_center:
                 st.markdown(f"Current difficulty: **{difficulty.upper()}**")
                 st.markdown("Click 'Generate Practice Ticket' to start.")
             else:
-                st.markdown("Enter your API key in the sidebar to get started.")
+                if not st.session_state.available_models:
+                    st.warning("No AI models available. Please check your API key.")
+                else:
+                    st.warning("Please select a model in the sidebar.")
         
         # Generate button
         if not st.session_state.ticket:
@@ -459,22 +380,38 @@ with col_center:
                          disabled=not can_generate):
                 
                 with st.spinner(f"Creating {difficulty} ticket..."):
-                    ticket, error = generate_ticket(
-                        st.session_state.user_api_key,
-                        st.session_state.selected_model,
-                        difficulty
-                    )
-                    
-                    if error:
-                        st.error(f"Error: {error}")
-                        # Still use the fallback ticket
-                    
-                    st.session_state.ticket = ticket
-                    st.session_state.agent_response = ""
-                    st.session_state.validation = None
-                    st.session_state.solution_effective = None
-                    
-                    st.rerun()
+                    try:
+                        model_instance = genai.GenerativeModel(st.session_state.selected_model)
+                        
+                        prompt = get_ticket_prompt(difficulty)
+                        
+                        response = model_instance.generate_content(
+                            prompt,
+                            generation_config=genai.types.GenerationConfig(
+                                temperature=0.3,
+                                max_output_tokens=300,
+                            )
+                        )
+                        
+                        response_text = response.text.strip()
+                        ticket_json = parse_json_from_text(response_text)
+                        
+                        if not ticket_json:
+                            st.error("Failed to generate ticket. The AI response was not valid JSON. Please try again.")
+                        else:
+                            ticket_json["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                            ticket_json["model"] = st.session_state.selected_model
+                            ticket_json["difficulty"] = difficulty
+                            st.session_state.ticket = ticket_json
+                            
+                            st.session_state.agent_response = ""
+                            st.session_state.validation = None
+                            st.session_state.solution_effective = None
+                            
+                            st.rerun()
+                            
+                    except Exception as e:
+                        st.error(f"Error generating ticket: {str(e)[:100]}")
         
         # Show ticket if exists
         if st.session_state.ticket:
@@ -534,41 +471,59 @@ with col_center:
                 
                 if st.button(hint_text,
                             use_container_width=True,
-                            disabled=not (response.strip() and can_generate)):
+                            disabled=not response.strip()):
                     if response.strip():
                         with st.spinner(f"Generating {difficulty_badge} hints..."):
-                            hints, error = get_hints(
-                                st.session_state.user_api_key,
-                                st.session_state.selected_model,
-                                ticket.get('issue', ''),
-                                response,
-                                difficulty_badge
-                            )
-                            
-                            if error:
-                                st.error(error)
-                            else:
-                                st.session_state.validation = hints
+                            try:
+                                model_instance = genai.GenerativeModel(st.session_state.selected_model)
+                                
+                                hint_prompt = get_hint_prompt(
+                                    ticket.get('issue', ''),
+                                    response,
+                                    difficulty_badge
+                                )
+                                
+                                validation_response = model_instance.generate_content(
+                                    hint_prompt,
+                                    generation_config=genai.types.GenerationConfig(
+                                        temperature=0.2,
+                                        max_output_tokens=400,
+                                    )
+                                )
+                                
+                                st.session_state.validation = validation_response.text.strip()
                                 st.rerun()
+                                
+                            except Exception as e:
+                                st.error(f"Failed to generate hints: {str(e)[:100]}")
             
             with col_btn2:
                 if st.button("✅ Check Solution", 
                             use_container_width=True,
-                            disabled=not (response.strip() and can_generate)):
+                            disabled=not response.strip()):
                     if response.strip():
                         with st.spinner("Evaluating solution..."):
-                            validation, error = validate_solution(
-                                st.session_state.user_api_key,
-                                st.session_state.selected_model,
-                                ticket.get('issue', ''),
-                                response
-                            )
-                            
-                            if error:
-                                st.error(error)
-                            else:
-                                st.session_state.solution_effective = validation
+                            try:
+                                model_instance = genai.GenerativeModel(st.session_state.selected_model)
+                                
+                                validation_prompt = get_validation_prompt(
+                                    ticket.get('issue', ''),
+                                    response
+                                )
+                                
+                                validation_response = model_instance.generate_content(
+                                    validation_prompt,
+                                    generation_config=genai.types.GenerationConfig(
+                                        temperature=0.1,
+                                        max_output_tokens=200,
+                                    )
+                                )
+                                
+                                st.session_state.solution_effective = validation_response.text.strip()
                                 st.rerun()
+                                
+                            except Exception as e:
+                                st.error(f"Failed to evaluate solution: {str(e)[:100]}")
             
             with col_btn3:
                 if st.button("🔄 New Ticket", 
@@ -615,7 +570,9 @@ with col_center:
                     st.markdown("**Now check if your improved solution would work!** → Use the ✅ Check Solution button")
             
             # Show both
-            if st.session_state.validation and st.session_state.solution_effective:
+            if (st.session_state.validation and 
+                st.session_state.solution_effective):
+                
                 st.markdown("---")
                 st.markdown("#### 🤔 Learning Summary")
                 st.markdown("You've received both **hints** to improve your thinking and **evaluation** of your solution's effectiveness!")
@@ -625,14 +582,6 @@ with col_center:
         
         # Instructions when no ticket
         else:
-            if not can_generate:
-                st.warning("""
-                **⚠️ Setup Required:**
-                1. Enter your Google AI API key in the sidebar
-                2. Click "Load Available Models"
-                3. Select a model from the list
-                """)
-            
             with st.expander("📚 How It Works"):
                 st.markdown("""
                 ### **Two-Step Learning Process**
@@ -653,30 +602,3 @@ with col_center:
 
 # Footer
 st.markdown("<br><br>", unsafe_allow_html=True)
-with st.expander("🎯 Evaluation Criteria"):
-    st.markdown("""
-    ### **How Solutions Are Evaluated**
-    
-    **✅ YES - Solution would likely fix the issue:**
-    - Addresses root cause effectively
-    - Includes all necessary steps
-    - Follows logical troubleshooting flow
-    - Would resolve issue for most users
-    
-    **⚠️ PARTIALLY - Solution might help but needs improvements:**
-    - Addresses some aspects but misses others
-    - Missing key troubleshooting steps
-    - Unclear or incomplete instructions
-    - Might work for some cases but not all
-    
-    **❌ NO - Solution would not fix the issue:**
-    - Doesn't address actual problem
-    - Based on incorrect assumptions
-    - Missing critical components
-    - Would not resolve the reported issue
-    
-    **💡 Hint System:**
-    - Simple level: General guidance
-    - Medium level: Specific improvements  
-    - Complex level: Strategic thinking
-    """)
