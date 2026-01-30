@@ -1,7 +1,7 @@
 import streamlit as st
 import json
 import re
-import google.generativeai as genai
+import requests
 from datetime import datetime
 
 # Page configuration
@@ -15,30 +15,29 @@ st.set_page_config(
 st.title("🤖 AI IT Support Ticket Generator")
 st.markdown("Generate IT tickets and get helpful hints for your solutions")
 
-# Get API key from Streamlit Secrets - Fixed the key name
+# Get API key from Streamlit Secrets
 try:
-    # Try different possible secret names
-    GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "") or st.secrets.get("GEMINI_API_KEY", "")
+    OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "") or st.secrets.get("API_KEY", "")
     
-    if not GOOGLE_API_KEY:
-        # Use the specific key you provided as a fallback (for testing)
-        GOOGLE_API_KEY = "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"
+    if not OPENROUTER_API_KEY:
+        # Use the specific key you provided
+        OPENROUTER_API_KEY = "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"
     
-    if not GOOGLE_API_KEY:
+    if not OPENROUTER_API_KEY:
         st.error("""
         ⚠️ **API Key Not Configured**
         
-        Please configure your Google AI API key in Streamlit Secrets:
+        Please configure your OpenRouter API key:
         
         **For Streamlit Cloud:**
         - Go to app settings → Secrets
-        - Add: `GOOGLE_API_KEY = "your-api-key-here"`
+        - Add: `OPENROUTER_API_KEY = "your-api-key-here"`
         
         **For local development:**
         - Create `.streamlit/secrets.toml`
-        - Add: `GOOGLE_API_KEY = "your-api-key-here"`
+        - Add: `OPENROUTER_API_KEY = "your-api-key-here"`
         
-        Get a free API key from: https://makersuite.google.com/app/apikey
+        Get a free API key from: https://openrouter.ai/settings/keys
         """)
         st.stop()
         
@@ -46,21 +45,29 @@ except Exception as e:
     st.error(f"Error loading API key: {str(e)[:100]}")
     st.stop()
 
-# Configure Google AI
-try:
-    genai.configure(api_key=GOOGLE_API_KEY)
-    # Test the configuration by listing models
-    genai.list_models()
-    api_key_valid = True
-except Exception as e:
-    error_msg = str(e)
-    if "API key not valid" in error_msg or "invalid" in error_msg.lower():
-        st.error(f"❌ **Invalid API Key:** The provided API key is not valid for Google Gemini API.")
-    elif "quota" in error_msg.lower():
-        st.error("❌ **Quota Exceeded:** API quota has been exceeded. Please check your Google AI Studio account.")
-    else:
-        st.error(f"❌ **API Configuration Error:** {error_msg[:150]}")
-    st.stop()
+# OpenRouter API configuration
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_HEADERS = {
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+    "HTTP-Referer": "https://it-ticket-generator.streamlit.app",
+    "X-Title": "IT Ticket Generator",
+    "Content-Type": "application/json"
+}
+
+# Available models on OpenRouter
+AVAILABLE_MODELS = [
+    "google/gemini-pro",
+    "google/gemini-pro-vision",
+    "google/gemini-flash-1.5",
+    "google/gemini-pro-1.5",
+    "openai/gpt-3.5-turbo",
+    "openai/gpt-4",
+    "openai/gpt-4-turbo",
+    "anthropic/claude-3-haiku",
+    "anthropic/claude-3-sonnet",
+    "meta-llama/llama-3-70b-instruct",
+    "mistralai/mistral-7b-instruct",
+]
 
 # Initialize session state
 if 'ticket' not in st.session_state:
@@ -70,32 +77,47 @@ if 'validation' not in st.session_state:
 if 'agent_response' not in st.session_state:
     st.session_state.agent_response = ""
 if 'selected_model' not in st.session_state:
-    st.session_state.selected_model = None
-if 'available_models' not in st.session_state:
-    st.session_state.available_models = []
+    st.session_state.selected_model = "google/gemini-flash-1.5"  # Default model
 if 'solution_effective' not in st.session_state:
     st.session_state.solution_effective = None
 
-def get_available_models():
-    """Get list of available models from Google AI."""
+def call_openrouter_api(model, messages, max_tokens=300, temperature=0.7):
+    """Make API call to OpenRouter."""
     try:
-        models = genai.list_models()
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
         
-        # Filter for text models that support generateContent
-        available = []
-        for model in models:
-            if "generateContent" in model.supported_generation_methods:
-                model_name = model.name
-                # Exclude vision and embedding models
-                if "-vision" not in model_name.lower() and "embed" not in model_name.lower():
-                    available.append(model_name)
+        response = requests.post(
+            OPENROUTER_API_URL,
+            headers=OPENROUTER_HEADERS,
+            json=payload,
+            timeout=30
+        )
         
-        # Sort models for better display
-        available.sort()
-        return available, None
-        
+        if response.status_code == 200:
+            result = response.json()
+            return result["choices"][0]["message"]["content"], None
+        else:
+            error_msg = response.text
+            if response.status_code == 401:
+                return None, "Invalid API key. Please check your OpenRouter API key."
+            elif response.status_code == 429:
+                return None, "Rate limit exceeded. Please try again later."
+            elif response.status_code == 403:
+                return None, "API key doesn't have permission for this model."
+            else:
+                return None, f"API Error {response.status_code}: {error_msg[:100]}"
+                
+    except requests.exceptions.Timeout:
+        return None, "Request timeout. Please try again."
+    except requests.exceptions.ConnectionError:
+        return None, "Connection error. Please check your internet connection."
     except Exception as e:
-        return [], f"Error fetching models: {str(e)[:100]}"
+        return None, f"Error: {str(e)[:100]}"
 
 def parse_json_from_text(text):
     """Extract and parse JSON from text."""
@@ -282,48 +304,37 @@ Example format:
 Return ONLY the JSON object, no other text.
 """
 
-# Initialize models on first load
-if not st.session_state.available_models:
-    with st.spinner("Loading available models..."):
-        models, error = get_available_models()
-        if error:
-            st.error(f"Failed to load models: {error}")
-        else:
-            st.session_state.available_models = models
-            if models:
-                # Prefer gemini-pro models if available
-                gemini_pro_models = [m for m in models if 'gemini-pro' in m]
-                if gemini_pro_models:
-                    st.session_state.selected_model = gemini_pro_models[0]
-                else:
-                    st.session_state.selected_model = models[0]
-
 # Sidebar for configuration
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    st.success("✅ API Key Configured")
-    st.caption("Using secure API key")
+    st.success("✅ OpenRouter API Configured")
+    st.caption(f"Using key: {OPENROUTER_API_KEY[:10]}...")
     
     # Model selection
-    if st.session_state.available_models:
-        st.markdown(f"### 🤖 Available Models ({len(st.session_state.available_models)})")
-        
-        selected = st.selectbox(
-            "Select AI Model",
-            st.session_state.available_models,
-            index=st.session_state.available_models.index(st.session_state.selected_model) 
-            if st.session_state.selected_model in st.session_state.available_models else 0,
-            key="model_selector"
-        )
-        st.session_state.selected_model = selected
-        
-        with st.expander("ℹ️ Model Details"):
-            st.markdown(f"**Selected:** `{selected}`")
-            if "flash" in selected.lower():
-                st.caption("⚡ Fast model, good for quick responses")
-            elif "pro" in selected.lower():
-                st.caption("🧠 Advanced model, better for complex tasks")
+    st.markdown(f"### 🤖 Available Models")
+    
+    selected = st.selectbox(
+        "Select AI Model",
+        AVAILABLE_MODELS,
+        index=AVAILABLE_MODELS.index(st.session_state.selected_model) 
+        if st.session_state.selected_model in AVAILABLE_MODELS else 0,
+        key="model_selector"
+    )
+    st.session_state.selected_model = selected
+    
+    with st.expander("ℹ️ Model Details"):
+        st.markdown(f"**Selected:** `{selected}`")
+        if "gemini" in selected.lower():
+            st.caption("🤖 Google Gemini model")
+        elif "gpt" in selected.lower():
+            st.caption("⚡ OpenAI GPT model")
+        elif "claude" in selected.lower():
+            st.caption("🧠 Anthropic Claude model")
+        elif "llama" in selected.lower():
+            st.caption("🦙 Meta Llama model")
+        elif "mistral" in selected.lower():
+            st.caption("🌪️ Mistral AI model")
     
     # Difficulty slider
     st.markdown("---")
@@ -358,7 +369,7 @@ with col_center:
     # Main container
     with st.container():
         # Check if ready
-        can_generate = st.session_state.selected_model is not None and len(st.session_state.available_models) > 0
+        can_generate = st.session_state.selected_model is not None
         
         # Header section
         if not st.session_state.ticket:
@@ -367,10 +378,7 @@ with col_center:
                 st.markdown(f"Current difficulty: **{difficulty.upper()}**")
                 st.markdown("Click 'Generate Practice Ticket' to start.")
             else:
-                if not st.session_state.available_models:
-                    st.warning("No AI models available. Please check your API key.")
-                else:
-                    st.warning("Please select a model in the sidebar.")
+                st.warning("Please select a model in the sidebar.")
         
         # Generate button
         if not st.session_state.ticket:
@@ -381,34 +389,46 @@ with col_center:
                 
                 with st.spinner(f"Creating {difficulty} ticket..."):
                     try:
-                        model_instance = genai.GenerativeModel(st.session_state.selected_model)
-                        
                         prompt = get_ticket_prompt(difficulty)
                         
-                        response = model_instance.generate_content(
-                            prompt,
-                            generation_config=genai.types.GenerationConfig(
-                                temperature=0.3,
-                                max_output_tokens=300,
-                            )
+                        messages = [
+                            {
+                                "role": "system",
+                                "content": "You are an IT support ticket generator. Always return valid JSON."
+                            },
+                            {
+                                "role": "user", 
+                                "content": prompt
+                            }
+                        ]
+                        
+                        response_text, error = call_openrouter_api(
+                            st.session_state.selected_model,
+                            messages,
+                            max_tokens=300,
+                            temperature=0.3
                         )
                         
-                        response_text = response.text.strip()
-                        ticket_json = parse_json_from_text(response_text)
-                        
-                        if not ticket_json:
-                            st.error("Failed to generate ticket. The AI response was not valid JSON. Please try again.")
+                        if error:
+                            st.error(f"API Error: {error}")
+                        elif response_text:
+                            ticket_json = parse_json_from_text(response_text)
+                            
+                            if not ticket_json:
+                                st.error("Failed to generate ticket. The AI response was not valid JSON. Please try again.")
+                            else:
+                                ticket_json["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                                ticket_json["model"] = st.session_state.selected_model
+                                ticket_json["difficulty"] = difficulty
+                                st.session_state.ticket = ticket_json
+                                
+                                st.session_state.agent_response = ""
+                                st.session_state.validation = None
+                                st.session_state.solution_effective = None
+                                
+                                st.rerun()
                         else:
-                            ticket_json["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                            ticket_json["model"] = st.session_state.selected_model
-                            ticket_json["difficulty"] = difficulty
-                            st.session_state.ticket = ticket_json
-                            
-                            st.session_state.agent_response = ""
-                            st.session_state.validation = None
-                            st.session_state.solution_effective = None
-                            
-                            st.rerun()
+                            st.error("No response from AI. Please try again.")
                             
                     except Exception as e:
                         st.error(f"Error generating ticket: {str(e)[:100]}")
@@ -475,24 +495,37 @@ with col_center:
                     if response.strip():
                         with st.spinner(f"Generating {difficulty_badge} hints..."):
                             try:
-                                model_instance = genai.GenerativeModel(st.session_state.selected_model)
-                                
                                 hint_prompt = get_hint_prompt(
                                     ticket.get('issue', ''),
                                     response,
                                     difficulty_badge
                                 )
                                 
-                                validation_response = model_instance.generate_content(
-                                    hint_prompt,
-                                    generation_config=genai.types.GenerationConfig(
-                                        temperature=0.2,
-                                        max_output_tokens=400,
-                                    )
+                                messages = [
+                                    {
+                                        "role": "system",
+                                        "content": "You are an IT mentor providing helpful hints."
+                                    },
+                                    {
+                                        "role": "user", 
+                                        "content": hint_prompt
+                                    }
+                                ]
+                                
+                                response_text, error = call_openrouter_api(
+                                    st.session_state.selected_model,
+                                    messages,
+                                    max_tokens=400,
+                                    temperature=0.2
                                 )
                                 
-                                st.session_state.validation = validation_response.text.strip()
-                                st.rerun()
+                                if error:
+                                    st.error(f"API Error: {error}")
+                                elif response_text:
+                                    st.session_state.validation = response_text
+                                    st.rerun()
+                                else:
+                                    st.error("No response from AI. Please try again.")
                                 
                             except Exception as e:
                                 st.error(f"Failed to generate hints: {str(e)[:100]}")
@@ -504,23 +537,36 @@ with col_center:
                     if response.strip():
                         with st.spinner("Evaluating solution..."):
                             try:
-                                model_instance = genai.GenerativeModel(st.session_state.selected_model)
-                                
                                 validation_prompt = get_validation_prompt(
                                     ticket.get('issue', ''),
                                     response
                                 )
                                 
-                                validation_response = model_instance.generate_content(
-                                    validation_prompt,
-                                    generation_config=genai.types.GenerationConfig(
-                                        temperature=0.1,
-                                        max_output_tokens=200,
-                                    )
+                                messages = [
+                                    {
+                                        "role": "system",
+                                        "content": "You are an IT solution evaluator."
+                                    },
+                                    {
+                                        "role": "user", 
+                                        "content": validation_prompt
+                                    }
+                                ]
+                                
+                                response_text, error = call_openrouter_api(
+                                    st.session_state.selected_model,
+                                    messages,
+                                    max_tokens=200,
+                                    temperature=0.1
                                 )
                                 
-                                st.session_state.solution_effective = validation_response.text.strip()
-                                st.rerun()
+                                if error:
+                                    st.error(f"API Error: {error}")
+                                elif response_text:
+                                    st.session_state.solution_effective = response_text
+                                    st.rerun()
+                                else:
+                                    st.error("No response from AI. Please try again.")
                                 
                             except Exception as e:
                                 st.error(f"Failed to evaluate solution: {str(e)[:100]}")
