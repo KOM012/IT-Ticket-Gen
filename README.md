@@ -4,6 +4,7 @@
 An interactive web application that generates realistic IT support tickets and helps users practice their troubleshooting skills using AI-powered feedback. The application provides hints and evaluates proposed solutions to help users improve their IT support abilities.
 
 ## share.streamlit.io
+try here:  https://itticketgen.streamlit.app/
 
 ## Features
 - **Dynamic Ticket Generation**: Creates IT support tickets at three difficulty levels (simple, medium, complex)
