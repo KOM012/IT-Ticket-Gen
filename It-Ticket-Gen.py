@@ -20,10 +20,6 @@ try:
     OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "") or st.secrets.get("API_KEY", "")
     
     if not OPENROUTER_API_KEY:
-        # Use the specific key you provided
-        OPENROUTER_API_KEY = "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"
-    
-    if not OPENROUTER_API_KEY:
         st.error("""
         ⚠️ **API Key Not Configured**
         
